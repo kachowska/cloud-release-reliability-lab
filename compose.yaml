@@ -1,0 +1,35 @@
+name: cloud-release-reliability-lab
+
+services:
+  release-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cloud-release-reliability-lab:local
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      RELEASE_SERVICE_NAME: release-status-service
+      RELEASE_VERSION: ${RELEASE_VERSION:-compose-dev}
+      RELEASE_COMMIT_SHA: ${RELEASE_COMMIT_SHA:-unknown}
+      RELEASE_ENVIRONMENT: compose
+      RELEASE_FORCE_NOT_READY: ${RELEASE_FORCE_NOT_READY:-false}
+    ports:
+      - "127.0.0.1:${RELEASE_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=2).read()"
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+

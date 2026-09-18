@@ -1,0 +1,118 @@
+name: release-reliability
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-reliability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-and-container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+          terraform_wrapper: false
+
+      - name: Install project and test dependencies
+        run: python -m pip install --disable-pip-version-check --editable '.[dev]'
+
+      - name: Run command-backed quality, Terraform, and container evidence
+        run: >-
+          scripts/validate.sh
+          --require-docker
+          --require-terraform
+          --release-id "ci-${GITHUB_SHA::12}"
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-validation-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  kind-release-drill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: quality-and-container
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+          terraform_wrapper: false
+
+      - name: Create ephemeral Kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: release-lab-ci
+          version: v0.33.0
+
+      - name: Build and load immutable candidate image
+        env:
+          IMAGE: cloud-release-reliability-lab:ci-${{ github.sha }}
+        run: |
+          docker build --tag "${IMAGE}" .
+          kind load docker-image "${IMAGE}" --name release-lab-ci
+
+      - name: Deploy through Terraform and verify rollout
+        env:
+          IMAGE: cloud-release-reliability-lab:ci-${{ github.sha }}
+        run: >-
+          scripts/deploy.sh
+          --context kind-release-lab-ci
+          --image "${IMAGE}"
+          --image-pull-policy Never
+          --release-id "ci-${GITHUB_SHA::12}"
+          --commit-sha "${GITHUB_SHA}"
+
+      - name: Smoke test, inject readiness failure, and prove rollback
+        run: |
+          kubectl --context kind-release-lab-ci --namespace release-lab \
+            port-forward service/release-status 18080:80 >evidence/port-forward.log 2>&1 &
+          port_forward_pid=$!
+          trap 'kill "${port_forward_pid}" 2>/dev/null || true' EXIT
+          EXPECTED_VERSION="ci-${GITHUB_SHA::12}" \
+            EXPECTED_COMMIT_SHA="${GITHUB_SHA}" \
+            scripts/smoke.sh http://127.0.0.1:18080
+          scripts/failure-drill.sh \
+            --context kind-release-lab-ci \
+            --base-url http://127.0.0.1:18080
+
+      - name: Upload Kubernetes drill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-drill-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 14

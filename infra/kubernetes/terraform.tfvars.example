@@ -1,0 +1,10 @@
+namespace         = "release-lab"
+name              = "release-status"
+image             = "cloud-release-reliability-lab:local"
+image_pull_policy = "Never"
+replicas          = 2
+release_version   = "2026.09.16-local"
+commit_sha        = "replace-with-git-sha"
+environment       = "kind"
+force_not_ready   = false
+
